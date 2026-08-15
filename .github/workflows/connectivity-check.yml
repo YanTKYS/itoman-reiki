@@ -1,0 +1,101 @@
+name: Reiki-Base Connectivity Check
+
+# Manual-only diagnostic workflow. It does NOT crawl or convert any
+# regulations; it only checks, from a GitHub-hosted runner, whether
+# https://www1.g-reiki.net/itoman/ (Itoman City's Reiki-Base regulation
+# collection) is reachable over HTTPS, and compares that against a plain
+# external site (https://example.com/) to tell a general connectivity
+# problem apart from a Reiki-Base-specific one.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  connectivity-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check HTTPS reachability of example.com and Reiki-Base
+        env:
+          # Identifies this diagnostic run to whoever inspects server logs;
+          # not a browser user-agent, and no attempt is made to look like one.
+          UA: "itoman-reiki-connectivity-check/1.0 (+https://github.com/${{ github.repository }}; GitHub Actions connectivity check, no crawling)"
+        run: |
+          set -u
+
+          check_url() {
+            local prefix="$1" label="$2" url="$3"
+            echo "### ${label}" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "- URL: ${url}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+            local curl_out curl_status
+            curl_out=$(curl -sS -L --max-time 20 --connect-timeout 10 -o /dev/null \
+                 -A "$UA" \
+                 -w 'HTTP_CODE=%{http_code}\nFINAL_URL=%{url_effective}\nCONTENT_TYPE=%{content_type}\nSIZE_BYTES=%{size_download}\n' \
+                 "$url" 2>&1)
+            curl_status=$?
+
+            if [ "$curl_status" -eq 0 ]; then
+              local code final_url ctype size
+              code=$(printf '%s\n' "$curl_out" | grep '^HTTP_CODE=' | cut -d= -f2-)
+              final_url=$(printf '%s\n' "$curl_out" | grep '^FINAL_URL=' | cut -d= -f2-)
+              ctype=$(printf '%s\n' "$curl_out" | grep '^CONTENT_TYPE=' | cut -d= -f2-)
+              size=$(printf '%s\n' "$curl_out" | grep '^SIZE_BYTES=' | cut -d= -f2-)
+
+              echo "http_status=${code} final_url=${final_url} content_type=${ctype} size_bytes=${size}"
+              {
+                echo "- Final HTTP status: ${code}"
+                echo "- Final URL: ${final_url}"
+                echo "- Content-Type: ${ctype}"
+                echo "- Response size (bytes): ${size}"
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              case "$code" in
+                2??)
+                  echo "- Result: SUCCESS" | tee -a "$GITHUB_STEP_SUMMARY"
+                  ;;
+                *)
+                  echo "- Result: FAILURE (non-2xx HTTP status)" | tee -a "$GITHUB_STEP_SUMMARY"
+                  ;;
+              esac
+              printf -v "${prefix}_CODE" '%s' "$code"
+            else
+              echo "curl could not complete the request (exit code ${curl_status}):"
+              echo "$curl_out"
+              {
+                echo "- Final HTTP status: (no response - connection-level failure)"
+                echo "- Result: FAILURE (connection error, curl exit code ${curl_status})"
+                echo '<details><summary>curl output</summary>'
+                echo
+                echo '```'
+                echo "$curl_out"
+                echo '```'
+                echo '</details>'
+              } >> "$GITHUB_STEP_SUMMARY"
+              printf -v "${prefix}_CODE" '%s' "CONNFAIL"
+            fi
+            echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+
+          check_url EXAMPLE "example.com (general external site)" "https://example.com/"
+          check_url REIKI "Itoman City Reiki-Base (www1.g-reiki.net)" "https://www1.g-reiki.net/itoman/reiki_menu.html"
+
+          {
+            echo "## Verdict"
+            case "${EXAMPLE_CODE}:${REIKI_CODE}" in
+              2??:2??)
+                echo "- example.com succeeded and Reiki-Base succeeded: this GitHub Actions runner can reach Reiki-Base. Connectivity check passed; no further implementation was done in this PR."
+                ;;
+              2??:*)
+                echo "- example.com succeeded (HTTP ${EXAMPLE_CODE}) but Reiki-Base did not (HTTP/status ${REIKI_CODE}): general outbound HTTPS from this runner works, but access to Reiki-Base specifically is being rejected or is unavailable. No workaround was attempted; the status above is the full result."
+                ;;
+              *)
+                echo "- Both example.com (HTTP/status ${EXAMPLE_CODE}) and Reiki-Base (HTTP/status ${REIKI_CODE}) failed: this looks like a problem with the GitHub Actions environment or this workflow itself, rather than a Reiki-Base-specific restriction."
+                ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "EXAMPLE_CODE=${EXAMPLE_CODE}"
+          echo "REIKI_CODE=${REIKI_CODE}"
